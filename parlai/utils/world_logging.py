@@ -132,11 +132,19 @@ class WorldLogger:
         print('[ Saving log to {} in ParlAI format ]'.format(outfile))
         with open(outfile, 'w') as fw:
             for episode in tqdm(self._logs):
-                ep = self.convert_to_labeled_data(episode)
+                # print (episode)
+                
+                ep = episode
+                # ep = self.convert_to_labeled_data(episode)
+                # print (ep)
+                # print ("=====\n")
+                # for act in ep:
+                #     txt = msg_to_str(act)
+                #     fw.write(txt + '\n')
                 for act in ep:
-                    txt = msg_to_str(act)
-                    fw.write(txt + '\n')
-                fw.write('\n')
+                    txt = json.dumps(act)
+                    fw.write(txt)
+                    fw.write('\n')
 
     def write_jsonl_format(self, outfile):
         print('[ Saving log to {} in jsonl format ]'.format(outfile))

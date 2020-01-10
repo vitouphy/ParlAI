@@ -22,11 +22,11 @@ once acting as Speaker 2.
 import os
 import json
 from parlai.core.teachers import FixedDialogTeacher
+from parlai.core.params import ParlaiParser
 from .build import build
 
 
 START_ENTRY = {'text': '__SILENCE__', 'emotion': 'no_emotion', 'act': 'no_act'}
-
 
 class Convai2Teacher(FixedDialogTeacher):
     def __init__(self, opt, shared=None):
@@ -84,7 +84,6 @@ class Convai2Teacher(FixedDialogTeacher):
         shared['data'] = self.data
         return shared
 
-
 class NoStartTeacher(Convai2Teacher):
     """
     Same as default teacher, but it doesn't contain __SILENCE__ entries.
@@ -124,6 +123,59 @@ class NoStartTeacher(Convai2Teacher):
         }
         return action
 
+class ContextTeacher(Convai2Teacher):
+    """
+    Same as default teacher, but it doesn't contain __SILENCE__ entries.
+
+    If we are the first speaker, then the first utterance is skipped.
+    """
+
+    def __init__(self, opt, shared=None):
+        super().__init__(opt, shared)
+
+        # Calculate the correct number of examples.
+        self.num_exs = sum(len(d['dialogue']) - 1 for d in self.data)
+
+        # Store all episodes separately, so we can deal with 2-turn dialogs.
+        self.all_eps = self.data + [d for d in self.data if len(d['dialogue']) > 2]
+        self.num_eps = len(self.all_eps)
+        self.history_size = opt['history_size']
+        
+
+    def get(self, episode_idx, entry_idx=0):
+        full_eps = self.all_eps[episode_idx]
+        entries = full_eps['dialogue']
+        # Sometimes we're speaker 1 and sometimes we're speaker 2.
+        # We can't be speaker 1 if dialog has only 2 turns.
+        
+        speaker_id = int(episode_idx >= len(self.data))
+        end_turn_idx = speaker_id + 2 * entry_idx
+        start_turn_idx = max(0, end_turn_idx - self.history_size + 1)
+        their_turns = entries[start_turn_idx : end_turn_idx+1]
+        my_turn = entries[1 + speaker_id + 2 * entry_idx]
+        episode_done = 2 * entry_idx + speaker_id + 1 >= len(entries) - 2
+
+        context_emotions = []
+        context_acts = []
+        context_texts = []
+        for turn in their_turns:
+            context_emotions.append(turn['emotion'])
+            context_acts.append(turn['act'])
+            context_texts.append(turn['text'])
+        context_text = "\n".join(context_texts)
+
+        action = {
+            'topic': full_eps['topic'],
+            'text': context_text,
+            'emotion': context_emotions,
+            'act_type': context_acts,
+            'labels': [my_turn['text']],
+            'labels_emotion': [my_turn['emotion']],
+            'labels_act': [my_turn['act']],
+            'episode_done': episode_done,
+        }
+
+        return action
 
 class DefaultTeacher(Convai2Teacher):
     pass

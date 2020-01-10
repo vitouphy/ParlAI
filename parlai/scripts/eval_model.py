@@ -101,7 +101,7 @@ def _eval_single_world(opt, agent, task):
     world_logger = WorldLogger(opt) if opt['save_world_logs'] else None
 
     task_opt = opt.copy()  # copy opt since we're editing the task
-    task_opt['task'] = task
+    # task_opt['task'] = task
     world = create_task(task_opt, agent)  # create worlds for tasks
 
     # set up logging
@@ -122,18 +122,26 @@ def _eval_single_world(opt, agent, task):
         if opt['display_examples']:
             # display examples
             print(world.display() + '\n~~')
+            # for a in world.acts:
+                # print (a)
+            # print (world.get_acts())
+            # print (world.acts)
+            
         if log_time.time() > log_every_n_secs:
             report = world.report()
             text, report = log_time.log(report['exs'], world.num_examples(), report)
             print(text)
 
     report = world.report()
+    print ("Printing Report")
+    print (report)
     world.reset()
 
     if world_logger is not None:
         # dump world acts to file
         world_logger.reset()  # add final acts to logs
         base_outfile = opt['report_filename'].split('.')[0]
+        print ("filename: ", base_outfile)
         outfile = base_outfile + f'_{task}_replies.jsonl'
         # world_logger.write_jsonl_format(outfile)
         world_logger.write_parlai_format(outfile)
@@ -171,6 +179,7 @@ def eval_model(opt, print_parser=None):
         print_parser.print_args()
 
     tasks = opt['task'].split(',')
+    # tasks = [opt['pytorch_teacher_task']]
     reports = []
     for task in tasks:
         task_report = _eval_single_world(opt, agent, task)
