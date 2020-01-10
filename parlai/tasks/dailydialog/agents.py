@@ -139,7 +139,7 @@ class ContextTeacher(Convai2Teacher):
         # Store all episodes separately, so we can deal with 2-turn dialogs.
         self.all_eps = self.data + [d for d in self.data if len(d['dialogue']) > 2]
         self.num_eps = len(self.all_eps)
-        self.history_size = opt['history_size']
+        self.history_size = opt.get('history_size', 5)
         
 
     def get(self, episode_idx, entry_idx=0):
