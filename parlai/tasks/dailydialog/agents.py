@@ -163,7 +163,7 @@ class ContextTeacher(Convai2Teacher):
             context_emotions.append(turn['emotion'])
             context_acts.append(turn['act'])
             context_texts.append(turn['text'])
-        context_text = "\n".join(context_texts)
+        context_text = " __eou__ ".join(context_texts)
 
         action = {
             'topic': full_eps['topic'],
