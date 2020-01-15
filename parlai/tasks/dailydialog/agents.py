@@ -141,6 +141,10 @@ class ContextTeacher(Convai2Teacher):
         self.num_eps = len(self.all_eps)
         # self.history_size = opt.get('history_size', 5)
         self.history_size = 5
+        self.start_token =  "<SOU>"
+        self.speaker_a = "<speaker_A>"
+        self.speaker_b = "<speaker_B>"
+        self.end_token = "<EOU>"
         
 
     def get(self, episode_idx, entry_idx=0):
@@ -159,11 +163,18 @@ class ContextTeacher(Convai2Teacher):
         context_emotions = []
         context_acts = []
         context_texts = []
-        for turn in their_turns:
+
+        for idx, turn in enumerate(their_turns):
             context_emotions.append(turn['emotion'])
             context_acts.append(turn['act'])
+
+            context_texts.append(self.start_token)
+            speaker_label = self.speaker_b if idx % 2 == 0 else self.speaker_a
+            context_texts.append(speaker_label)
             context_texts.append(turn['text'])
-        context_text = " __eou__ ".join(context_texts)
+            context_texts.append(self.end_token)
+
+        context_text = " ".join(context_texts)
 
         action = {
             'topic': full_eps['topic'],
