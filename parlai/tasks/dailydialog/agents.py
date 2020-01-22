@@ -212,7 +212,8 @@ class RerankTeacher(Convai2Teacher):
 
     def get_data_folder(self):
         dir_path = os.path.join(self.opt['datapath'], self.opt['task'].split(':')[0])
-        cand_path = os.path.join(dir_path, "cands_{}.txt".format(self.opt['datatype']))
+        datatype = self.opt['datatype'].split(':')[0]
+        cand_path = os.path.join(dir_path, "cands_{}:ordered:stream.txt".format(datatype))
         return cand_path
 
     def load_candidates(self, cand_path):
@@ -230,9 +231,11 @@ class RerankTeacher(Convai2Teacher):
                 if cand.strip() == groundtruth.strip():
                     match_indices.append(idx)
             candidates.pop(match_indices[0])
+            if include_gt:
+                candidates.append(groundtruth)
             return candidates
             
-            
+
         # case that num_cands > 0
         total_cands = len(self.candidates)
         candidates = []
@@ -265,9 +268,10 @@ class RerankTeacher(Convai2Teacher):
         context_acts = []
         context_texts = []
 
-        if self.opt['datatype'] in ['train', 'valid']:
+        datatype = self.opt['datatype'].split(':')[0]
+        if datatype in ['train', 'valid']:
             candidates = self.get_candidates(my_turn['text'], num_cands=10, include_gt=True)
-        else:
+        elif datatype == 'test':
             candidates = self.get_candidates(my_turn['text'], num_cands=-1, include_gt=False)
 
         for idx, turn in enumerate(their_turns):

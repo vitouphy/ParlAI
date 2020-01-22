@@ -708,6 +708,7 @@ class TrainLoop:
             )
         opt = self.opt
         world = self.world
+        count = 0
         with world:
             while True:
                 # do one example / batch of examples

@@ -48,15 +48,18 @@ def build_cands(opt):
     for _ in range(num_examples):
         world.parley()
         # We get the acts of the first agent, which is the teacher.
-        acts = world.get_acts()[0]
-        if isinstance(acts, dict):
-            # We turn into a batch of 1 example, in case batching is being used.
-            acts = [acts]
-        for a in acts:
-            candidate = a.get('labels', a.get('eval_labels', None))
-            if candidate is not None:
-                candidate = candidate[0]
-                cands.add(candidate)
+        # this part is modified to get all utterances
+        for acts in world.get_acts():
+            acts = world.get_acts()[0]
+            if isinstance(acts, dict):
+                # We turn into a batch of 1 example, in case batching is being used.
+                acts = [acts]
+            for a in acts:
+                candidate = a.get('labels', a.get('eval_labels', None))
+                if candidate is not None:
+                    candidate = candidate[0]
+                    cands.add(candidate)
+
         if log_timer.time() > opt['log_every_n_secs']:
             text, _log = log_timer.log(world.total_parleys, world.num_examples())
             print(text)
