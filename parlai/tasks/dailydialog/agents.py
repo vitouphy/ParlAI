@@ -168,9 +168,13 @@ class ContextTeacher(Convai2Teacher):
         for idx, turn in enumerate(their_turns):
             context_emotions.append(turn['emotion'])
             context_acts.append(turn['act'])
-
             context_texts.append(self.start_token)
-            speaker_label = self.speaker_b if idx % 2 == 0 else self.speaker_a
+
+            if ((len(their_turns) % 2 == 0) + idx) % 2 == 0:
+                speaker_label = self.speaker_b 
+            else: 
+                speaker_label = self.speaker_a
+                
             context_texts.append(speaker_label)
             context_texts.append(turn['text'])
             context_texts.append(self.end_token)
@@ -277,9 +281,13 @@ class RerankTeacher(Convai2Teacher):
         for idx, turn in enumerate(their_turns):
             context_emotions.append(turn['emotion'])
             context_acts.append(turn['act'])
-
             context_texts.append(self.start_token)
-            speaker_label = self.speaker_b if idx % 2 == 0 else self.speaker_a
+
+            if ((len(their_turns) % 2 == 0) + idx) % 2 == 0:
+                speaker_label = self.speaker_b 
+            else: 
+                speaker_label = self.speaker_a
+
             context_texts.append(speaker_label)
             context_texts.append(turn['text'])
             context_texts.append(self.end_token)
