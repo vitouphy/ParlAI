@@ -142,10 +142,10 @@ class ContextTeacher(Convai2Teacher):
         self.num_eps = len(self.all_eps)
         # self.history_size = opt.get('history_size', 5)
         self.history_size = 5
-        self.start_token =  "<SOU>"
-        self.speaker_a = "<speaker_A>"
-        self.speaker_b = "<speaker_B>"
-        self.end_token = "<EOU>"
+        self.start_token =  "__SOU__"
+        self.speaker_a = "__speaker_A__"
+        self.speaker_b = "__speaker_B__"
+        self.end_token = "__EOU__"
         
 
     def get(self, episode_idx, entry_idx=0):
@@ -207,10 +207,10 @@ class RerankTeacher(Convai2Teacher):
         self.num_eps = len(self.all_eps)
 
         self.history_size = 5
-        self.start_token =  "<SOU>"
-        self.speaker_a = "<speaker_A>"
-        self.speaker_b = "<speaker_B>"
-        self.end_token = "<EOU>"
+        self.start_token =  "__SOU__"
+        self.speaker_a = "__speaker_A__"
+        self.speaker_b = "__speaker_B__"
+        self.end_token = "__EOU__"
 
         self.candidates = self.load_candidates(self.get_data_folder())
 
@@ -221,8 +221,10 @@ class RerankTeacher(Convai2Teacher):
         return cand_path
 
     def load_candidates(self, cand_path):
+        candidates = []
         with open(cand_path) as file:
-            candidates = file.readlines()
+            for line in file:
+                candidates.append(line.strip())
             return candidates
 
     def get_candidates(self, groundtruth, num_cands=10, include_gt=True):
@@ -252,6 +254,7 @@ class RerankTeacher(Convai2Teacher):
             candidates.append(self.candidates[idx])
 
         candidates.append(groundtruth)
+        random.shuffle(candidates)
         return candidates
         
 
