@@ -30,6 +30,21 @@ from .build import build
 START_ENTRY = {'text': '__SILENCE__', 'emotion': 'no_emotion', 'act': 'no_act'}
 
 class Convai2Teacher(FixedDialogTeacher):
+
+    @staticmethod
+    def add_cmdline_args(parser):
+        """
+        Add command line args specific to this agent.
+        """
+        parser = parser.add_argument_group('DailyDialog Arguments')
+        parser.add_argument(
+            '-dhs',
+            '--data_history_size',
+            type=int,
+            default=5,
+            help='number of context utterances',
+        )
+
     def __init__(self, opt, shared=None):
         super().__init__(opt, shared)
         self.opt = opt
@@ -41,10 +56,19 @@ class Convai2Teacher(FixedDialogTeacher):
             self._setup_data(fold)
 
         self.num_exs = sum(len(d['dialogue']) for d in self.data)
+        self.start_token =  "__SOU__"
+        self.speaker_a = "__speaker_A__"
+        self.speaker_b = "__speaker_B__"
+        self.end_token = "__EOU__"
 
         # we learn from both sides of every conversation
         self.num_eps = 2 * len(self.data)
         self.reset()
+
+    def get_history_size(self):
+        if self.history_size == -1:
+            return random.randint(1, 5)
+        return self.history_size
 
     def num_episodes(self):
         return self.num_eps
@@ -140,23 +164,19 @@ class ContextTeacher(Convai2Teacher):
         # Store all episodes separately, so we can deal with 2-turn dialogs.
         self.all_eps = self.data + [d for d in self.data if len(d['dialogue']) > 2]
         self.num_eps = len(self.all_eps)
-        # self.history_size = opt.get('history_size', 5)
-        self.history_size = 5
-        self.start_token =  "__SOU__"
-        self.speaker_a = "__speaker_A__"
-        self.speaker_b = "__speaker_B__"
-        self.end_token = "__EOU__"
+        self.history_size = opt.get('data_history_size')
         
-
+    
     def get(self, episode_idx, entry_idx=0):
         full_eps = self.all_eps[episode_idx]
         entries = full_eps['dialogue']
+        history_size = self.get_history_size()
         # Sometimes we're speaker 1 and sometimes we're speaker 2.
         # We can't be speaker 1 if dialog has only 2 turns.
         
         speaker_id = int(episode_idx >= len(self.data))
         end_turn_idx = speaker_id + 2 * entry_idx
-        start_turn_idx = max(0, end_turn_idx - self.history_size + 1)
+        start_turn_idx = max(0, end_turn_idx - history_size + 1)
         their_turns = entries[start_turn_idx : end_turn_idx+1]
         my_turn = entries[1 + speaker_id + 2 * entry_idx]
         episode_done = 2 * entry_idx + speaker_id + 1 >= len(entries) - 2
@@ -205,13 +225,7 @@ class RerankTeacher(Convai2Teacher):
         # Store all episodes separately, so we can deal with 2-turn dialogs.
         self.all_eps = self.data + [d for d in self.data if len(d['dialogue']) > 2]
         self.num_eps = len(self.all_eps)
-
-        self.history_size = 5
-        self.start_token =  "__SOU__"
-        self.speaker_a = "__speaker_A__"
-        self.speaker_b = "__speaker_B__"
-        self.end_token = "__EOU__"
-
+        self.history_size = opt.get('data_history_size')
         self.candidates = self.load_candidates(self.get_data_folder())
 
     def get_data_folder(self):
@@ -261,12 +275,13 @@ class RerankTeacher(Convai2Teacher):
     def get(self, episode_idx, entry_idx=0):
         full_eps = self.all_eps[episode_idx]
         entries = full_eps['dialogue']
+        history_size = self.get_history_size()
         # Sometimes we're speaker 1 and sometimes we're speaker 2.
         # We can't be speaker 1 if dialog has only 2 turns.
         
         speaker_id = int(episode_idx >= len(self.data))
         end_turn_idx = speaker_id + 2 * entry_idx
-        start_turn_idx = max(0, end_turn_idx - self.history_size + 1)
+        start_turn_idx = max(0, end_turn_idx - history_size + 1)
         their_turns = entries[start_turn_idx : end_turn_idx+1]
         my_turn = entries[1 + speaker_id + 2 * entry_idx]
         episode_done = 2 * entry_idx + speaker_id + 1 >= len(entries) - 2
@@ -311,8 +326,5 @@ class RerankTeacher(Convai2Teacher):
 
         return action
     
-
-    
-
 class DefaultTeacher(Convai2Teacher):
     pass
