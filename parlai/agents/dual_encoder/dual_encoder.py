@@ -11,6 +11,7 @@ In this example, we will just use a simple bag of words model.
 from parlai.core.torch_ranker_agent import TorchRankerAgent
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 class DualEncoder(nn.Module):
     """
@@ -23,22 +24,24 @@ class DualEncoder(nn.Module):
         hidden_dim = opt.get('hidden_dim', 512)
         embedding_size = opt.get('embedding_size', 128)
         num_layers = opt.get('num_layers', 1)
+
+        self.dropout = opt.get('dropout', 0)
         self.dict = dictionary
         self.embeddings = nn.Embedding(len(dictionary), embedding_size)
         self.ctx_encoder = nn.GRU(
             input_size=embedding_size, 
             hidden_size=hidden_dim, 
             num_layers=num_layers, 
-            batch_first=True
+            batch_first=True,
         )
         self.cand_encoder = nn.GRU(
             input_size=embedding_size, 
             hidden_size=hidden_dim, 
             num_layers=num_layers, 
-            batch_first=True
+            batch_first=True,
         )
-        self.M = torch.randn(hidden_dim, hidden_dim)
-        self.bias = torch.randn(1)
+        self.M = torch.randn(hidden_dim, hidden_dim).cuda()
+        self.bias = torch.randn(1).cuda()
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, batch, cand_vecs, cand_encs=None):
@@ -52,9 +55,10 @@ class DualEncoder(nn.Module):
         num_cands = cand_vecs.size(1)
         batch_size = ctx_hidden.size(1)
         hidden_size = ctx_hidden.size(-1)
-        ctx_hidden = ctx_hidden.squeeze().unsqueeze(1)
-        ctx_hidden = ctx_hidden.expand(batch_size, num_cands, hidden_size)
+        ctx_hidden = ctx_hidden.squeeze().view(-1, hidden_size).unsqueeze(1)
+        ctx_hidden = ctx_hidden.expand(-1, num_cands, hidden_size)
         ctx_hidden = ctx_hidden.reshape(-1, hidden_size)
+        ctx_hidden = F.dropout(ctx_hidden, p=self.dropout)
 
         # compute the embedding for candidates
         cand_vecs = cand_vecs.reshape(-1, cand_vecs.size(2))
@@ -62,6 +66,7 @@ class DualEncoder(nn.Module):
         cand_output, cand_hidden = self.cand_encoder(cands_emb)
         cand_hidden = cand_hidden.squeeze()
         cand_hidden = torch.matmul(cand_hidden, self.M.t())
+        cand_hidden = F.dropout(cand_hidden, p=self.dropout)
 
         # conver the score to sigmoid
         score = torch.sum(ctx_hidden * cand_hidden, 1).unsqueeze(1)
@@ -83,9 +88,11 @@ class DualEncoderAgent(TorchRankerAgent):
         Add CLI args.
         """
         TorchRankerAgent.add_cmdline_args(argparser)
-        arg_group = argparser.add_argument_group('ExampleBagOfWordsModel Arguments')
-        arg_group.add_argument('--hidden-dim', type=int, default=512)
-
+        arg_group = argparser.add_argument_group('DualEncoder Arguments')
+        arg_group.add_argument('--hiddensize', type=int, default=512)
+        arg_group.add_argument('--embedding_size', type=int, default=128)
+        arg_group.add_argument('--num_layers', type=int, default=1)
+        arg_group.add_argument('--dropout', type=float, default=0)
     def score_candidates(self, batch, cand_vecs, cand_encs=None):
         """
         This function takes in a Batch object as well as a Tensor of candidate vectors.
@@ -103,4 +110,4 @@ class DualEncoderAgent(TorchRankerAgent):
         `self.model`.
         """
         # return ExampleBagOfWordsModel(self.opt, self.dict)
-        return DualEncoder(self.opt, self.dict)
+        return DualEncoder(self.opt, self.dict).cuda()
