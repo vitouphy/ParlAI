@@ -7,14 +7,6 @@
 import unittest
 import parlai.utils.testing as testing_utils
 
-try:
-    import torch
-
-    version = float('.'.join(torch.__version__.split('.')[:2]))  # type: ignore
-    TORCH_AVAILABLE = version >= 1.2
-except ImportError:
-    TORCH_AVAILABLE = False
-
 BASE_ARGS = {
     # Model Args
     'model': 'image_seq2seq',
@@ -61,10 +53,7 @@ EVAL_ARGS = {
 }
 
 
-@unittest.skip(
-    "need pytorch 1.4 release, https://github.com/pytorch/vision/issues/1712"
-)
-@unittest.skipUnless(TORCH_AVAILABLE, 'Must use torch 1.2 or above')
+@testing_utils.skipUnlessTorch14
 class TestImageSeq2Seq(unittest.TestCase):
     """
     Unit tests for the ImageSeq2Seq Agent.
@@ -79,9 +68,9 @@ class TestImageSeq2Seq(unittest.TestCase):
         """
         args = BASE_ARGS.copy()
         args.update(TEXT_ARGS)
-        stdout, valid, test = testing_utils.train_model(args)
+        valid, test = testing_utils.train_model(args)
         self.assertLessEqual(
-            valid['ppl'], 1.5, f'failed to train image_seq2seq on text task: {stdout}'
+            valid['ppl'], 1.5, f'failed to train image_seq2seq on text task'
         )
 
     @testing_utils.retry(ntries=3)
@@ -96,9 +85,9 @@ class TestImageSeq2Seq(unittest.TestCase):
         args = BASE_ARGS.copy()
         args.update(IMAGE_ARGS)
 
-        stdout, valid, test = testing_utils.train_model(args)
+        valid, test = testing_utils.train_model(args)
         self.assertLessEqual(
-            valid['ppl'], 6.6, f'failed to train image_seq2seq on image task: {stdout}'
+            valid['ppl'], 6.6, f'failed to train image_seq2seq on image task'
         )
 
     @testing_utils.retry(ntries=3)
@@ -111,23 +100,10 @@ class TestImageSeq2Seq(unittest.TestCase):
         args = BASE_ARGS.copy()
         args.update(MULTITASK_ARGS)
 
-        stdout, valid, test = testing_utils.train_model(args)
+        valid, test = testing_utils.train_model(args)
         self.assertLessEqual(
-            valid['ppl'],
-            5.0,
-            f'failed to train image_seq2seq on image+text task: {stdout}',
+            valid['ppl'], 5.0, f'failed to train image_seq2seq on image+text task',
         )
-
-    def test_compute_tokenized_bleu(self):
-        """
-        Test that the model outputs self-computed bleu correctly.
-        """
-        args = BASE_ARGS.copy()
-        args.update(EVAL_ARGS)
-
-        stdout, valid, _ = testing_utils.eval_model(args, skip_test=True)
-        self.assertIn('fairseq_bleu', valid)
-        self.assertIn('nltk_bleu_unnormalized', valid)
 
 
 if __name__ == '__main__':

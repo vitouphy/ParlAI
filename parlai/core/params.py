@@ -13,7 +13,14 @@ import os
 import sys as _sys
 import datetime
 import parlai
-import git
+
+try:
+    import git
+
+    GIT_AVAILABLE = True
+except ImportError:
+    # silence the error
+    GIT_AVAILABLE = False
 
 from parlai.core.build_data import modelzoo_path
 from parlai.core.loader import load_teacher_module, load_agent_module, load_world_module
@@ -43,6 +50,8 @@ def print_git_commit():
         internal_commit = git_.rev_parse('HEAD')
         print(f'[ Current internal commit: {internal_commit} ]')
     except git.GitCommandNotFound:
+        pass
+    except git.GitCommandError:
         pass
 
 
@@ -118,6 +127,18 @@ def get_model_name(opt):
     return model
 
 
+def str2none(value: str):
+    """
+    If the value is a variant of `none`, return None.
+
+    Otherwise, return the original value.
+    """
+    if value.lower() == 'none':
+        return None
+    else:
+        return value
+
+
 def str2bool(value):
     """
     Convert 'yes', 'false', '1', etc.
@@ -182,7 +203,7 @@ def fix_underscores(args):
     return args
 
 
-class CustomHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+class CustomHelpFormatter(argparse.HelpFormatter):
     """
     Produce a custom-formatted `--help` option.
 
@@ -190,8 +211,8 @@ class CustomHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
     """
 
     def __init__(self, *args, **kwargs):
-        kwargs['max_help_position'] = 8
-        kwargs['width'] = 130
+        kwargs['max_help_position'] = 6
+        kwargs['width'] = 80
         super().__init__(*args, **kwargs)
 
     def _format_action_invocation(self, action):
@@ -200,6 +221,22 @@ class CustomHelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
         default = self._get_default_metavar_for_optional(action)
         args_string = self._format_args(action, default)
         return ', '.join(action.option_strings) + ' ' + args_string
+
+    def _get_help_string(self, action):
+        help = action.help
+        if '%(default)' not in action.help:
+            if action.default is not argparse.SUPPRESS:
+                defaulting_nargs = [argparse.OPTIONAL, argparse.ZERO_OR_MORE]
+                if action.option_strings or action.nargs in defaulting_nargs:
+                    help += ' (default: %(default)s)'
+        if (
+            hasattr(action, 'recommended')
+            and action.recommended
+            and action.recommended != action.default
+        ):
+            help += '(recommended: %(recommended)s)'
+            help = help.replace(')(recommended', ', recommended')
+        return help
 
 
 class ParlaiParser(argparse.ArgumentParser):
@@ -232,7 +269,9 @@ class ParlaiParser(argparse.ArgumentParser):
             allow_abbrev=False,
             conflict_handler='resolve',
             formatter_class=CustomHelpFormatter,
+            add_help=add_parlai_args,
         )
+        self.register('type', 'nonestr', str2none)
         self.register('type', 'bool', str2bool)
         self.register('type', 'floats', str2floats)
         self.register('type', 'class', str2class)
@@ -634,6 +673,14 @@ class ParlaiParser(argparse.ArgumentParser):
             type=int,
             help='batch size for minibatch training schemes',
         )
+        parlai.add_argument(
+            '-dynb',
+            '--dynamic-batching',
+            default=None,
+            type='nonestr',
+            choices={None, 'full', 'batchsort'},
+            help='Use dynamic batching',
+        )
         self.add_parlai_data_path(parlai)
 
     def add_distributed_training_args(self):
@@ -652,107 +699,6 @@ class ParlaiParser(argparse.ArgumentParser):
             hidden=True,
         )
         return grp
-
-    def add_pytorch_datateacher_args(self):
-        """
-        Add CLI args for PytorchDataTeacher.
-        """
-        pytorch = self.add_argument_group('PytorchData Arguments')
-        pytorch.add_argument(
-            '-pyt',
-            '--pytorch-teacher-task',
-            help='Use the PytorchDataTeacher for multiprocessed '
-            'data loading with a standard ParlAI task, e.g. "babi:Task1k"',
-        )
-        pytorch.add_argument(
-            '-pytd',
-            '--pytorch-teacher-dataset',
-            help='Use the PytorchDataTeacher for multiprocessed '
-            'data loading with a pytorch Dataset, e.g. "vqa_1" or "flickr30k"',
-        )
-        pytorch.add_argument(
-            '--pytorch-datapath',
-            type=str,
-            default=None,
-            help='datapath for pytorch data loader'
-            '(note: only specify if the data does not reside'
-            'in the normal ParlAI datapath)',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '-nw',
-            '--numworkers',
-            type=int,
-            default=4,
-            help='how many workers the Pytorch dataloader should use',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '--pytorch-preprocess',
-            type='bool',
-            default=False,
-            help='Whether the agent should preprocess the data while building'
-            'the pytorch data',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '-pybsrt',
-            '--pytorch-teacher-batch-sort',
-            type='bool',
-            default=False,
-            help='Whether to construct batches of similarly sized episodes'
-            'when using the PytorchDataTeacher (either via specifying `-pyt`',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '--batch-sort-cache-type',
-            type=str,
-            choices=['pop', 'index', 'none'],
-            default='pop',
-            help='how to build up the batch cache',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '--batch-length-range',
-            type=int,
-            default=5,
-            help='degree of variation of size allowed in batch',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '--shuffle',
-            type='bool',
-            default=False,
-            help='Whether to shuffle the data',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '--batch-sort-field',
-            type=str,
-            default='text',
-            help='What field to use when determining the length of an episode',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '-pyclen',
-            '--pytorch-context-length',
-            default=-1,
-            type=int,
-            help='Number of past utterances to remember when building flattened '
-            'batches of data in multi-example episodes.'
-            '(For use with PytorchDataTeacher)',
-            hidden=True,
-        )
-        pytorch.add_argument(
-            '-pyincl',
-            '--pytorch-include-labels',
-            default=True,
-            type='bool',
-            help='Specifies whether or not to include labels as past utterances when '
-            'building flattened batches of data in multi-example episodes.'
-            '(For use with PytorchDataTeacher)',
-            hidden=True,
-        )
 
     def add_model_args(self):
         """
@@ -829,21 +775,6 @@ class ParlaiParser(argparse.ArgumentParser):
                 # already added
                 pass
 
-    def add_pyt_dataset_args(self, opt):
-        """
-        Add arguments specific to specified pytorch dataset.
-        """
-        from parlai.core.pytorch_data_teacher import get_dataset_classes
-
-        dataset_classes = get_dataset_classes(opt)
-        for dataset, _, _ in dataset_classes:
-            try:
-                if hasattr(dataset, 'add_cmdline_args'):
-                    dataset.add_cmdline_args(self)
-            except argparse.ArgumentError:
-                # already added
-                pass
-
     def add_image_args(self, image_mode):
         """
         Add additional arguments for handling images.
@@ -890,16 +821,6 @@ class ParlaiParser(argparse.ArgumentParser):
         evaltask = parsed.get('evaltask', None)
         if evaltask is not None:
             self.add_task_args(evaltask)
-
-        # find pytorch teacher task if specified, add its specific arguments
-        pytorch_teacher_task = parsed.get('pytorch_teacher_task', None)
-        if pytorch_teacher_task is not None:
-            self.add_task_args(pytorch_teacher_task)
-
-        # find pytorch dataset if specified, add its specific arguments
-        pytorch_teacher_dataset = parsed.get('pytorch_teacher_dataset', None)
-        if pytorch_teacher_dataset is not None:
-            self.add_pyt_dataset_args(parsed)
 
         # find which model specified if any, and add its specific arguments
         model = get_model_name(parsed)
@@ -1076,7 +997,8 @@ class ParlaiParser(argparse.ArgumentParser):
 
         if print_args:
             self.print_args()
-            print_git_commit()
+            if GIT_AVAILABLE:
+                print_git_commit()
             print_announcements(self.opt)
 
         return self.opt
@@ -1125,35 +1047,32 @@ class ParlaiParser(argparse.ArgumentParser):
             self._show_advanced_args = True
         return self._show_advanced_args
 
-    def _handle_hidden_args(self, kwargs):
+    def _handle_custom_options(self, kwargs):
         """
-        Hide help messages for arguments marked as hidden.
-        """
-        if 'hidden' in kwargs:
-            flag = kwargs['hidden']
-            del kwargs['hidden']
-            if flag and not self.show_advanced_args:
-                kwargs['help'] = argparse.SUPPRESS
-        return kwargs
+        Handle custom parlai options.
 
-    def _augment_help_msg(self, kwargs):
+        Includes hidden, recommended. Future may include no_save and no_override.
         """
-        Add recommended value to help string if recommended exists.
-        """
-        if 'help' in kwargs:
-            if 'recommended' in kwargs:
-                kwargs['help'] += " (recommended: " + str(kwargs['recommended']) + ")"
-                del kwargs['recommended']
-        return kwargs
+        action_attr = {}
+        if 'recommended' in kwargs:
+            rec = kwargs.pop('recommended')
+            action_attr['recommended'] = rec
+        action_attr['hidden'] = kwargs.get('hidden', False)
+        if 'hidden' in kwargs:
+            hidden = kwargs.pop('hidden')
+            if hidden:
+                kwargs['help'] = argparse.SUPPRESS
+        return kwargs, action_attr
 
     def add_argument(self, *args, **kwargs):
         """
         Override to convert underscores to hyphens for consistency.
         """
-        kwargs = self._augment_help_msg(kwargs)
-        return super().add_argument(
-            *fix_underscores(args), **self._handle_hidden_args(kwargs)
-        )
+        kwargs, newattr = self._handle_custom_options(kwargs)
+        action = super().add_argument(*fix_underscores(args), **kwargs)
+        for k, v in newattr.items():
+            setattr(action, k, v)
+        return action
 
     def add_argument_group(self, *args, **kwargs):
         """
@@ -1163,10 +1082,11 @@ class ParlaiParser(argparse.ArgumentParser):
         original_add_arg = arg_group.add_argument
 
         def ag_add_argument(*args, **kwargs):
-            kwargs = self._augment_help_msg(kwargs)
-            return original_add_arg(
-                *fix_underscores(args), **self._handle_hidden_args(kwargs)
-            )
+            kwargs, newattr = self._handle_custom_options(kwargs)
+            action = original_add_arg(*fix_underscores(args), **kwargs)
+            for k, v in newattr.items():
+                setattr(action, k, v)
+            return action
 
         arg_group.add_argument = ag_add_argument  # override _ => -
         arg_group.add_argument_group = self.add_argument_group

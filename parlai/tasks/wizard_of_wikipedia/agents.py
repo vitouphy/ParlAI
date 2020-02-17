@@ -16,9 +16,11 @@ E.g. `wizard_of_wikipedia:WizardDialogKnowledgeTeacher:random_split`
 """
 
 import copy
-import parlai.core.agents as core_agents
-from parlai.core.agents import create_task_agent_from_taskname
-from parlai.core.teachers import FixedDialogTeacher
+from parlai.core.teachers import (
+    FixedDialogTeacher,
+    MultiTaskTeacher,
+    create_task_agent_from_taskname,
+)
 from .build import build
 
 import json
@@ -346,7 +348,7 @@ class BasicdialogTeacher(WizardOfWikipediaTeacher):
         super().__init__(opt, shared)
         self.speaker_label = opt.get('speaker_label', 'both')
         self.add_topic = opt.get('add_topic', False)
-        self.num_exs = sum(len(d['dialog']) // 2 for d in self.data)
+        self.num_exs = sum(self.len_episode(i) for i in range(len(self.data)))
 
     @staticmethod
     def add_cmdline_args(argparser):
@@ -390,6 +392,7 @@ class BasicdialogTeacher(WizardOfWikipediaTeacher):
         text = dialog_entry_1['text']
         labels = [dialog_entry_2['text']]
 
+        assert isinstance(self.add_topic, bool)
         if self.add_topic and entry_idx == 0:
             text = d.get('chosen_topic', '') + '\n' + text
 
@@ -410,19 +413,17 @@ class BasicdialogTeacher(WizardOfWikipediaTeacher):
 
 class BasicWizardDialogTeacher(BasicdialogTeacher):
     def __init__(self, opt, shared=None):
+        opt['speaker_label'] = "wizard"
         super().__init__(opt, shared)
-        self.speaker_label = "wizard"
-        self.add_topic = True
 
 
 class BasicApprenticeDialogTeacher(BasicdialogTeacher):
     def __init__(self, opt, shared=None):
+        opt['speaker_label'] = 'apprentice'
         super().__init__(opt, shared)
-        self.speaker_label = 'apprentice'
-        self.add_topic = True
 
 
-class BasicBothDialogTeacher(core_agents.MultiTaskTeacher):
+class BasicBothDialogTeacher(MultiTaskTeacher):
     def __init__(self, opt, shared=None):
         opt = copy.deepcopy(opt)
         opt[

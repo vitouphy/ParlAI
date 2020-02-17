@@ -30,9 +30,12 @@ from parlai.utils.torch import neginf
 
 try:
     from apex.normalization.fused_layer_norm import FusedLayerNorm as LayerNorm
+
+    APEX_LAYER_NORM = True
 except ImportError:
-    warn_once("Installing APEX can give a significant speed boost.")
     from torch.nn import LayerNorm
+
+    APEX_LAYER_NORM = False
 
 LAYER_NORM_EPS = 1e-5  # Epsilon for layer norm.
 
@@ -41,6 +44,8 @@ def _normalize(tensor, norm_layer):
     """
     Broadcast layer norm.
     """
+    if not APEX_LAYER_NORM:
+        warn_once("Installing APEX can give a significant speed boost.")
     size = tensor.size()
     return norm_layer(tensor.view(-1, size[-1])).view(size)
 
@@ -64,9 +69,14 @@ def _build_encoder(
     n_positions=1024,
     n_segments=0,
 ):
+    n_layers = (
+        opt['n_encoder_layers']
+        if opt.get('n_encoder_layers', -1) > 0
+        else opt['n_layers']
+    )
     return TransformerEncoder(
         n_heads=opt['n_heads'],
-        n_layers=opt['n_layers'],
+        n_layers=n_layers,
         embedding_size=opt['embedding_size'],
         ffn_size=opt['ffn_size'],
         vocabulary_size=len(dictionary),
@@ -89,9 +99,14 @@ def _build_encoder(
 def _build_decoder(
     opt, dictionary, embedding=None, padding_idx=None, n_positions=1024, n_segments=0
 ):
+    n_layers = (
+        opt['n_decoder_layers']
+        if opt.get('n_decoder_layers', -1) > 0
+        else opt['n_layers']
+    )
     return TransformerDecoder(
         n_heads=opt['n_heads'],
-        n_layers=opt['n_layers'],
+        n_layers=n_layers,
         embedding_size=opt['embedding_size'],
         ffn_size=opt['ffn_size'],
         vocabulary_size=len(dictionary),

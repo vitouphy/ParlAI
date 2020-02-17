@@ -19,13 +19,12 @@ Contains the following main utilities:
 See below for documentation on each specific tool.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Union, List, Tuple
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from collections import deque
 import json
 import random
-import numpy as np
 import os
 import torch
 from torch import optim
@@ -33,15 +32,20 @@ from torch import optim
 from parlai.core.opt import Opt
 from parlai.core.agents import Agent
 from parlai.utils.thread import SharedTable
-from parlai.core.build_data import modelzoo_path
 from parlai.core.dict import DictionaryAgent
+from parlai.nn.lr_scheduler import ParlAILRScheduler
 from parlai.core.message import Message
-from parlai.utils.misc import AttrDict, warn_once, round_sigfigs
-from parlai.utils.torch import argsort, fp16_optimizer_wrapper, padded_tensor
-
-
-class StopTrainException(Exception):
-    pass
+from parlai.utils.misc import AttrDict, warn_once
+from parlai.utils.fp16 import (
+    fp16_apex_available,
+    fp16_optimizer_wrapper,
+    MemoryEfficientFP16Optimizer,
+    MemoryEfficientFP16Adam,
+    Adafactor,
+)
+from parlai.core.metrics import Metrics, Metric, AverageMetric, SumMetric, FixedMetric
+from parlai.utils.distributed import is_primary_worker
+from parlai.utils.torch import argsort, padded_tensor
 
 
 class Batch(AttrDict):
@@ -348,8 +352,10 @@ class TorchAgent(ABC, Agent):
         }
         try:
             import apex.optimizers.fused_adam as fused_adam
+            import apex.optimizers.fused_lamb as fused_lamb
 
             optims['fused_adam'] = fused_adam.FusedAdam
+            optims['fused_lamb'] = fused_lamb.FusedLAMB
         except ImportError:
             pass
 
@@ -362,6 +368,10 @@ class TorchAgent(ABC, Agent):
         except ImportError:
             # no QHM installed
             pass
+
+        # now pull in memory efficient implementations
+        optims['mem_eff_adam'] = MemoryEfficientFP16Adam
+        optims['adafactor'] = Adafactor
 
         return optims
 
@@ -411,7 +421,6 @@ class TorchAgent(ABC, Agent):
                 'random',
                 'glove',
                 'glove-fixed',
-                'glove-twitter-fixed',
                 'fasttext',
                 'fasttext-fixed',
                 'fasttext_cc',
@@ -433,6 +442,20 @@ class TorchAgent(ABC, Agent):
         )
         agent.add_argument(
             '--fp16', type='bool', default=False, help='Use fp16 computations.'
+        )
+        agent.add_argument(
+            '--fp16-impl',
+            type=str,
+            default='apex',
+            choices=['apex', 'mem_efficient'],
+            help='Implementation of FP16 to use',
+        )
+        agent.add_argument(
+            '--force-fp16-tokens',
+            type='bool',
+            default=False,
+            hidden=True,
+            help='Add the special fp16 tokens even if not using fp16.',
         )
         # optimizer arguments
         optim_group = agent.add_argument_group('Optimizer Arguments')
@@ -461,6 +484,14 @@ class TorchAgent(ABC, Agent):
             hidden=True,
             help='Epsilon value for Adam optimizers. Set to 1e-6 if your '
             'large model has stability issues, but prefer the default.',
+        )
+        optim_group.add_argument(
+            '--adafactor-eps',
+            default='1e-30,1e-3',
+            type='floats',
+            help='Epsilon values for adafactor optimizer: regularization '
+            'constants for square gradient and parameter scale respectively',
+            recommended='1e-30,1e-3',
         )
         optim_group.add_argument(
             '-mom',
@@ -498,55 +529,6 @@ class TorchAgent(ABC, Agent):
             default=None,
             help='Weight decay on the weights.',
         )
-
-        # lr scheduler
-        lr_group = agent.add_argument_group('Learning Rate Scheduler')
-        lr_group.add_argument(
-            '--lr-scheduler',
-            type=str,
-            default='reduceonplateau',
-            choices=['reduceonplateau', 'none', 'fixed', 'invsqrt'],
-            help='Learning rate scheduler.',
-        )
-        lr_group.add_argument(
-            '--lr-scheduler-patience',
-            type=int,
-            default=3,
-            help='LR scheduler patience. In number of validation runs. If using '
-            'fixed scheduler, LR is decayed every <patience> validations.',
-        )
-        lr_group.add_argument(
-            '--lr-scheduler-decay',
-            type=float,
-            default=0.5,
-            help='Decay factor for LR scheduler, or how much LR is multiplied by '
-            'when it is lowered.',
-        )
-        lr_group.add_argument(
-            '--warmup-updates',
-            type=int,
-            default=-1,
-            hidden=True,
-            help='Learning rate warmup period, in number of SGD updates. '
-            'Linearly scales up LR over period. Only enabled if > 0.',
-        )
-        lr_group.add_argument(
-            '--warmup-rate',
-            type=float,
-            default=1e-4,
-            hidden=True,
-            help='Warmup learning rate *multiplier*. Initial LR is multiplied by '
-            'this value. Linearly adjusted up to 1.0 across --warmup-updates '
-            'steps.',
-        )
-        lr_group.add_argument(
-            '--update-freq',
-            type=int,
-            default=1,
-            hidden=True,
-            help='Accumulate gradients N times before performing an optimizer.step().',
-        )
-
         # preprocessing arguments
         agent.add_argument(
             '-rc',
@@ -640,6 +622,7 @@ class TorchAgent(ABC, Agent):
         )
 
         cls.dictionary_class().add_cmdline_args(argparser)
+        ParlAILRScheduler.add_cmdline_args(argparser)
 
     def __init__(self, opt: Opt, shared=None):
         """
@@ -652,6 +635,13 @@ class TorchAgent(ABC, Agent):
         self.__expecting_clear_history = False
         self.__expecting_to_reply = False
 
+        # used for sharing metrics back to the teacher
+        self._local_metrics: Dict[str, List[Metric]] = {}
+        # we may want to temporarily disable local metrics, roughly similar to
+        # `with torch.no_grad`. See TorchGeneratorAgent._init_cuda_buffer for
+        # example
+        self.__local_metrics_enabled = True
+
         # check for cuda
         self.use_cuda = not opt['no_cuda'] and torch.cuda.is_available()
         if self.use_cuda:
@@ -661,27 +651,31 @@ class TorchAgent(ABC, Agent):
                 torch.cuda.set_device(opt['gpu'])
         # indicate whether using fp16
         self.fp16 = self.use_cuda and self.opt.get('fp16', False)
+        if self.fp16:
+            # check that the implementation requested is available
+            self.fp16_impl = self.opt.get('fp16_impl', 'apex')
+            if self.fp16_impl == 'apex' and not fp16_apex_available():
+                self.fp16 = False
 
         if shared is None:
             # intitialize any important structures from scratch
             self.dict = self.build_dictionary()
 
-            if opt.get('fp16'):
+            if opt.get('fp16') or opt.get('force_fp16_tokens'):
                 # Volta cores revert to FP32 hardware if tensors are not multiples
                 # of 8 in all dimensions. This INCLUDES the embeddings layer! As
                 # such, we need some extra magic to ensure the dictionary is padded
                 # with extra tokens to make it a multiple of 8.
-                if len(self.dict) % 8 != 0:
-                    for i in range(8 - len(self.dict) % 8):
+                from parlai.utils.torch import FP16_PAD_SIZE
+
+                if len(self.dict) % FP16_PAD_SIZE != 0:
+                    for i in range(FP16_PAD_SIZE - len(self.dict) % FP16_PAD_SIZE):
                         self.dict['__FP16_PAD_{}__'.format(i)] = 1
 
+            # global_metrics keeps track of batch-level or global-level metrics
+            self.global_metrics = Metrics(opt.get('numthreads', 1) > 1, shared=None)
+            # self.metrics is there for legacy reasons
             self.metrics: Dict[str, Any] = {}
-            # gradient norms
-            self.metrics['gnorm'] = 0.0
-            # gradient clipping rate
-            self.metrics['clip'] = 0.0
-            # number of calls to optimizer.step()
-            self.metrics['updates'] = 0
         else:
             # copy initialized data from shared table
             self.opt = shared['opt']
@@ -689,6 +683,9 @@ class TorchAgent(ABC, Agent):
             self.model = shared['model']
             self.criterion = shared['criterion']
             self.metrics = shared['metrics']
+            self.global_metrics = Metrics(
+                opt.get('numthreads', 1) > 1, shared=shared['global_metrics']
+            )
 
         if opt.get('numthreads', 1) > 1:
             torch.set_num_threads(1)
@@ -790,6 +787,7 @@ class TorchAgent(ABC, Agent):
 
         return init_model, is_finetune
 
+    @abstractmethod
     def build_model(self):
         """
         Construct the model and return it.
@@ -830,21 +828,64 @@ class TorchAgent(ABC, Agent):
             # turn on amsgrad for adam
             # amsgrad paper: https://openreview.net/forum?id=ryQu7f-RZ
             kwargs['amsgrad'] = True
+            if self.fp16 and self.fp16_impl == 'mem_efficient':
+                # grab this implementation instead
+                opt['optimizer'] = 'mem_eff_adam'
         elif opt['optimizer'] == 'qhadam':
             # set nus for qhadam
             kwargs['nus'] = opt.get('nus', (0.7, 1.0))
-        if opt['optimizer'] in ['adam', 'sparseadam', 'fused_adam', 'adamax', 'qhadam']:
+        elif opt['optimizer'] == 'adafactor':
+            # adafactor params
+            kwargs['beta1'] = opt.get('betas', (0.9, 0.999))[0]
+            kwargs['eps'] = opt['adafactor_eps']
+            kwargs['warmup_init'] = opt.get('warmup_updates', -1) > 0
+
+        if opt['optimizer'] in [
+            'adam',
+            'sparseadam',
+            'fused_adam',
+            'adamax',
+            'qhadam',
+            'fused_lamb',
+        ]:
             # set betas for optims that use it
             kwargs['betas'] = opt.get('betas', (0.9, 0.999))
             # set adam optimizer, but only if user specified it
             if opt.get('adam_eps'):
                 kwargs['eps'] = opt['adam_eps']
 
+        # handle fused_adam where the user doesn't have apex installed
+        if saved_optim_type == 'fused_adam' and 'fused_adam' not in self.optim_opts():
+            # we trained with apex, but the user doesn't have apex installed.
+            saved_optim_type = 'adam'
+
+        if (
+            self.opt['optimizer'] == 'fused_adam'
+            and 'fused_adam' not in self.optim_opts()
+        ):
+            raise ImportError(
+                'You are using --optimizer fused_adam, but you do not have APEX '
+                'installed. Please install APEX (https://github.com/NVIDIA/apex) or '
+                'switch to --optimizer adam.'
+            )
+
         optim_class = self.optim_opts()[opt['optimizer']]
         self.optimizer = optim_class(params, **kwargs)
         if self.fp16:
-            self.optimizer = fp16_optimizer_wrapper(self.optimizer)
-
+            if self.fp16_impl == 'apex':
+                self.optimizer = fp16_optimizer_wrapper(self.optimizer)
+            else:
+                # Using memory efficient optimizer
+                opt_name = opt['optimizer']
+                compatible_list = MemoryEfficientFP16Optimizer.compatible_optimizers()
+                is_compat = opt_name in compatible_list
+                if not is_compat:
+                    raise RuntimeError(
+                        f'The optimizer you selected {opt_name} is not compatible '
+                        'with Memory Efficient FP16. Please select from among this '
+                        f'list:\n{compatible_list}'
+                    )
+                self.optimizer = MemoryEfficientFP16Optimizer(self.optimizer)
         # TODO: we might want to hard reset optimizers here in the
         # case of fine tuning. Some rudimentary experiments seemed to
         # indicate that keeping adam weights around was desirable, so this
@@ -862,9 +903,11 @@ class TorchAgent(ABC, Agent):
                 optim_states['loss_scaler'] = self.optimizer.state_dict()['loss_scaler']
             elif optimstate_fp16 and not self.fp16:
                 # old optimizer was fp16 but now we're doing fp32,
-                # drop the fp16 wrapper from the state_dict and just load
+                # if apex, drop the fp16 wrapper from the state_dict and just load
                 # the fp16 weights into the fp32 tensors
-                optim_states = optim_states['optimizer_state_dict']
+                if 'optimizer_state_dict' in optim_states:
+                    # trained with apex
+                    optim_states = optim_states['optimizer_state_dict']
             elif not optimstate_fp16 and self.fp16:
                 # old optimizer was fp32, but now we're doing fp16.
                 # this is a bit clunky, but alternatives are worse
@@ -883,103 +926,65 @@ class TorchAgent(ABC, Agent):
 
     def build_lr_scheduler(self, states=None, hard_reset=False):
         """
-        Create the learning rate scheduler, and assign it to self.scheduler.
-
-        This scheduler will be updated upon a call to receive_metrics.
-        May also create self.warmup_scheduler, if appropriate.
+        Create the learning rate scheduler, and assign it to self.scheduler. This
+        scheduler will be updated upon a call to receive_metrics. May also create
+        self.warmup_scheduler, if appropriate.
 
         :param state_dict states: Possible state_dict provided by model
             checkpoint, for restoring LR state
-
         :param bool hard_reset: If true, the LR scheduler should ignore the
             state dictionary.
         """
-        # first make sure there are no null pointers
         if states is None:
             states = {}
         optimizer = self.optimizer
         if self.fp16:
             # lr schedulers don't work with apex, they expect the "real" optimizer
             optimizer = optimizer.optimizer
-
-        warmup_updates = self.opt.get('warmup_updates', -1)
-        updates_so_far = states.get('number_training_updates', 0)
-        if warmup_updates > 0 and (updates_so_far < warmup_updates or hard_reset):
-
-            def _warmup_lr(step):
-                start = self.opt['warmup_rate']
-                end = 1.0
-                progress = min(1.0, step / self.opt['warmup_updates'])
-                lr_mult = start + (end - start) * progress
-                return lr_mult
-
-            self.warmup_scheduler = optim.lr_scheduler.LambdaLR(optimizer, _warmup_lr)
-        else:
-            self.warmup_scheduler = None
-
-        patience = self.opt.get('lr_scheduler_patience', 3)
-        decay = self.opt.get('lr_scheduler_decay', 0.5)
-
-        if self.opt.get('lr_scheduler') == 'none':
-            self.scheduler = None
-        elif decay == 1.0:
-            warn_once(
-                "Your LR decay is set to 1.0. Assuming you meant you wanted "
-                "to disable learning rate scheduling. Adjust --lr-scheduler-decay "
-                "if this is not correct."
+        self.scheduler = ParlAILRScheduler.lr_scheduler_factory(
+            self.opt, optimizer, states, hard_reset
+        )
+        if self.scheduler:
+            self._number_training_updates = (
+                self.scheduler.get_initial_number_training_updates()
             )
-            self.scheduler = None
-        elif self.opt.get('lr_scheduler') == 'reduceonplateau':
-            self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, 'min', factor=decay, patience=patience, verbose=True
-            )
-        elif self.opt.get('lr_scheduler') == 'fixed':
-            self.scheduler = optim.lr_scheduler.StepLR(optimizer, patience, gamma=decay)
-        elif self.opt.get('lr_scheduler') == 'invsqrt':
-            if self.opt.get('warmup_updates', -1) <= 0:
-                raise ValueError(
-                    '--lr-scheduler invsqrt requires setting --warmup-updates'
-                )
-            warmup_updates = self.opt['warmup_updates']
-            decay_factor = np.sqrt(max(1, warmup_updates))
 
-            def _invsqrt_lr(step):
-                return decay_factor / np.sqrt(max(1, step))
+    def _control_local_metrics(self, enabled: bool = False, disabled: bool = False):
+        """
+        Used to temporarily disable local metrics.
 
-            self.scheduler = optim.lr_scheduler.LambdaLR(optimizer, _invsqrt_lr)
-        else:
+        This is useful for things like when you need to call super(), but
+        prevent the parent from recording some metric. For example, if you're
+        forwarding a dummy batch or calling super() but still want to modify
+        the output.
+
+        You can compare this to torch.no_grad in its goal.
+        """
+        if not (enabled ^ disabled):
             raise ValueError(
-                "Don't know what to do with lr_scheduler '{}'".format(
-                    self.opt.get('lr_scheduler')
-                )
+                'You must provide exactly one of enabled or disabled to '
+                '_control_local_metrics.'
             )
+        self.__local_metrics_enabled = enabled
 
-        # time to load LR state from the checkpoint, if possible.
-        if (
-            # there is already an old LR scheduler saved on disk
-            states
-            and
-            # and the old LR scheduler is different
-            states.get('lr_scheduler_type') != self.opt['lr_scheduler']
-            and
-            # and we're not already using a fresh scheduler
-            not hard_reset
-        ):
-            # the LR scheduler changed, start things fresh
-            warn_once("LR scheduler is different from saved. Starting fresh!")
-            hard_reset = True
+    def record_local_metric(self, keyname: str, values: List[Metric]):
+        """
+        Record an example-level metric for all items in the batch.
 
-        if hard_reset:
-            # We're not going to use the LR schedule, let's just exit
+        Local metrics are maybe recorded anywhere within batch act. They will
+        automatically be collated and returned at the end of batch_act. The
+        beginning of batch_act resets these, so you may not use them during
+        observe.
+
+        Example local metrics include ppl, token_acc, any other agent-specific
+        metrics.
+        """
+        if not self.__local_metrics_enabled:
             return
-
-        # do the actual loading (if possible)
-        if 'number_training_updates' in states:
-            self._number_training_updates = states['number_training_updates']
-        if self.scheduler and 'lr_scheduler' in states:
-            self.scheduler.load_state_dict(states['lr_scheduler'])
-        if states.get('warmup_scheduler') and getattr(self, 'warmup_scheduler', None):
-            self.warmup_scheduler.load_state_dict(states['warmup_scheduler'])
+        if keyname in self._local_metrics:
+            # we could relax this already
+            raise KeyError(f"Already recorded metrics for {keyname}")
+        self._local_metrics[keyname] = values
 
     def report(self):
         """
@@ -987,22 +992,21 @@ class TorchAgent(ABC, Agent):
 
         Report includes learning rate and number of training updates.
         """
-        metrics = {}
+        report = self.global_metrics.report()
+
         # only report LR if we have a scheduler
         if hasattr(self, 'scheduler') and self.scheduler is not None:
-            current_lr = round_sigfigs(self.optimizer.param_groups[0]['lr'], 4)
-            metrics['lr'] = round_sigfigs(current_lr, 4)
-        metrics['total_train_updates'] = self._number_training_updates
-
-        steps = self.metrics['updates']
-        if steps > 0 and self.opt.get('gradient_clip', -1) > 0:
-            metrics['gnorm'] = round_sigfigs(self.metrics['gnorm'] / steps, 4)
-            metrics['clip'] = round_sigfigs(self.metrics['clip'] / steps, 2)
+            report['lr'] = AverageMetric(self.optimizer.param_groups[0]['lr'])
 
         if self.use_cuda:
-            metrics['gpu_mem_percent'] = round_sigfigs(self._gpu_usage(), sigfigs=3)
+            report['gpu_mem_percent'] = AverageMetric(self._gpu_usage())
 
-        return metrics
+        if is_primary_worker() and self._number_training_updates:
+            # number train updates doesn't work in hogwild sadly, and should only
+            # be done on the primary worker
+            report['total_train_updates'] = FixedMetric(self._number_training_updates)
+
+        return report
 
     def _gpu_usage(self):
         """
@@ -1032,75 +1036,18 @@ class TorchAgent(ABC, Agent):
             )
         return memory_used / memory_avail
 
-    def _is_lr_warming_up(self):
-        """
-        Check if we're warming up the learning rate.
-        """
-        return (
-            self.warmup_scheduler is not None
-            and self._number_training_updates <= self.opt['warmup_updates']
-        )
-
     def receive_metrics(self, metrics_dict):
-        """
-        Use the metrics to decide when to adjust LR schedule.
-
-        This uses the loss as the validation metric if present, if not this
-        function does nothing. Note that the model must be reporting loss for
-        this to work.
-
-        Override this to override the behavior.
-        """
         if not hasattr(self, 'scheduler') or self.scheduler is None:
             return
-
-        if self._is_lr_warming_up():
-            # we're not done warming up, so don't start using validation
-            # metrics to adjust schedule
-            return
-
-        if self.opt['lr_scheduler'] == 'none':
-            # no scheduler, nothing to adjust here
-            pass
-        elif self.opt['lr_scheduler'] == 'reduceonplateau':
-            if 'loss' not in metrics_dict:
-                # nothing to step on, just skip
-                warn_once("LR scheduler expected to see loss metric, but didn't.")
-                return
-            self.scheduler.step(metrics_dict['loss'])
-        elif self.opt['lr_scheduler'] == 'fixed':
-            self.scheduler.step()
-        elif self.opt['lr_scheduler'] == 'invsqrt':
-            # this is a training step lr scheduler, nothing to adjust in validation
-            pass
-        else:
-            raise ValueError(
-                "Don't know how to work with lr scheduler '{}'".format(
-                    self.opt['lr_scheduler']
-                )
-            )
+        self.scheduler.valid_step(metrics_dict)
 
     def _get_embtype(self, emb_type):
         # set up preinitialized embeddings
-        try:
-            import torchtext.vocab as vocab
-        except ImportError as ex:
-            print('Please install torch text with `pip install torchtext`')
-            raise ex
-        pretrained_dim = 300
         if emb_type.startswith('glove'):
-            if 'twitter' in emb_type:
-                init = 'glove-twitter'
-                name = 'twitter.27B'
-                pretrained_dim = 200
-            else:
-                init = 'glove'
-                name = '840B'
-            embs = vocab.GloVe(
-                name=name,
-                dim=pretrained_dim,
-                cache=modelzoo_path(self.opt.get('datapath'), 'zoo:glove_vectors'),
-            )
+            init = 'glove'
+            from parlai.zoo.glove_vectors.build import download
+
+            embs = download(self.opt.get('datapath'))
         elif emb_type.startswith('fasttext_cc'):
             init = 'fasttext_cc'
             from parlai.zoo.fasttext_cc_vectors.build import download
@@ -1198,6 +1145,7 @@ class TorchAgent(ABC, Agent):
             self.metrics = SharedTable(self.metrics)
             self.model.share_memory()
         shared['metrics'] = self.metrics
+        shared['global_metrics'] = self.global_metrics.share()
 
         shared['dict'] = self.dict
         shared['model'] = self.model
@@ -1413,6 +1361,29 @@ class TorchAgent(ABC, Agent):
         self._set_label_cands_vec(obs, add_start, add_end, label_truncate)
         return obs
 
+    def _pad_tensor(
+        self, items: List[Union[List[int], torch.LongTensor]]
+    ) -> Tuple[torch.LongTensor, List[int]]:
+        """
+        Create a right padded matrix from an uneven list of lists.
+
+        Returns (padded, lengths), where padded is the padded matrix, and lengths
+        is a list containing the lengths of each row.
+
+        :param list[iter[int]] items: List of items
+        :returns: (padded, lengths) tuple
+        :rtype: (Tensor[int64], list[int])
+
+        This is intentionally overridable so that models can control how
+        to pad their input.
+        """
+        return padded_tensor(
+            items,
+            pad_idx=self.NULL_IDX,
+            use_cuda=self.use_cuda,
+            fp16friendly=self.fp16,
+        )
+
     def is_valid(self, obs):
         """
         Determine if an observation is valid or not.
@@ -1460,9 +1431,7 @@ class TorchAgent(ABC, Agent):
         xs, x_lens = None, None
         if any(ex.get('text_vec') is not None for ex in exs):
             _xs = [ex.get('text_vec', self.EMPTY) for ex in exs]
-            xs, x_lens = padded_tensor(
-                _xs, self.NULL_IDX, self.use_cuda, fp16friendly=self.opt.get('fp16')
-            )
+            xs, x_lens = self._pad_tensor(_xs)
             if sort:
                 sort = False  # now we won't sort on labels
                 xs, x_lens, valid_inds, exs = argsort(
@@ -1481,12 +1450,8 @@ class TorchAgent(ABC, Agent):
             labels = [ex.get(field + '_choice') for ex in exs]
             y_lens = [y.shape[0] for y in label_vecs]
 
-            ys, y_lens = padded_tensor(
-                label_vecs,
-                self.NULL_IDX,
-                self.use_cuda,
-                fp16friendly=self.opt.get('fp16'),
-            )
+            ys, y_lens = self._pad_tensor(label_vecs)
+
             if sort and xs is None:
                 ys, valid_inds, label_vecs, labels, y_lens = argsort(
                     y_lens, ys, valid_inds, label_vecs, labels, y_lens, descending=True
@@ -1554,6 +1519,7 @@ class TorchAgent(ABC, Agent):
                 continue
             for i, sub_val in zip(valid_inds, v):
                 batch_reply[i][k] = sub_val
+
         return batch_reply
 
     def observe(self, observation):
@@ -1712,10 +1678,9 @@ class TorchAgent(ABC, Agent):
         else:
             states['number_training_updates'] = self._number_training_updates
             if getattr(self, 'scheduler', None):
-                states['lr_scheduler'] = self.scheduler.state_dict()
+                states['lr_scheduler'] = self.scheduler.get_state_dict()
                 states['lr_scheduler_type'] = self.opt['lr_scheduler']
-            if getattr(self, 'warmup_scheduler', None):
-                states['warmup_scheduler'] = self.warmup_scheduler.state_dict()
+                states['warmup_scheduler'] = self.scheduler.get_warmup_state_dict()
 
         return states
 
@@ -1759,7 +1724,21 @@ class TorchAgent(ABC, Agent):
 
         This is easily overridable to facilitate transfer of state dicts.
         """
-        self.model.load_state_dict(state_dict)
+        try:
+            self.model.load_state_dict(state_dict)
+        except RuntimeError as msg:
+            msg_ = str(msg)
+            if 'size mismatch' in msg_ and 'embedding' in msg_:
+                raise RuntimeError(
+                    f'{msg_}\n'
+                    '-----------------\n'
+                    'Could not load the model due to a size mismatch in the '
+                    'embeddings. A common reason for this is trying to load '
+                    'a model trained with fp16 but loaded without fp16. Try '
+                    'adding --fp16 true or --force-fp16-tokens true.'
+                )
+            else:
+                raise
 
     def load(self, path: str) -> Dict[str, Any]:
         """
@@ -1767,12 +1746,30 @@ class TorchAgent(ABC, Agent):
 
         Override this method for more specific loading.
         """
-        states = torch.load(path, map_location=lambda cpu, _: cpu)
+        import parlai.utils.pickle
+
+        states = torch.load(
+            path, map_location=lambda cpu, _: cpu, pickle_module=parlai.utils.pickle
+        )
         if 'model' in states:
             self.load_state_dict(states['model'])
         if 'optimizer' in states and hasattr(self, 'optimizer'):
             self.optimizer.load_state_dict(states['optimizer'])
         return states
+
+    @classmethod
+    def upgrade_opt(cls, opt_from_disk: Opt):
+        # call the parent upgrades
+        opt_from_disk = super(TorchAgent, cls).upgrade_opt(opt_from_disk)
+
+        if opt_from_disk.get('fp16'):
+            # 2020-01-28 If the model was trained with fp16, we might not have saved
+            # the dict with the special fp16 tokens (https://git.io/Jvm7N), IF the
+            # dict was built the same time as the model. We set this to tell the
+            # model it MUST add the fp16 tokens, even if it's not fp16 mode now.
+            opt_from_disk['force_fp16_tokens'] = True
+
+        return opt_from_disk
 
     def reset(self):
         """
@@ -1791,9 +1788,7 @@ class TorchAgent(ABC, Agent):
         Reset all TorchAgentMetrics.
         """
         super().reset_metrics()
-        self.metrics['gnorm'] = 0.0
-        self.metrics['clip'] = 0.0
-        self.metrics['updates'] = 0
+        self.global_metrics.clear()
 
     def act(self):
         """
@@ -1816,11 +1811,12 @@ class TorchAgent(ABC, Agent):
         ``eval_step`` methods instead. The former is called when labels are
         present in the observations batch; otherwise, the latter is called.
         """
-        batch_size = len(observations)
+        # clear local metrics before anything else
+        self._local_metrics.clear()
+
         # initialize a list of replies with this agent's id
         batch_reply = [
-            Message({'id': self.getID(), 'episode_done': False})
-            for _ in range(batch_size)
+            Message({'id': self.getID(), 'episode_done': False}) for _ in observations
         ]
 
         # check if there are any labels available, if so we will train on them
@@ -1829,18 +1825,49 @@ class TorchAgent(ABC, Agent):
         # create a batch from the vectors
         batch = self.batchify(observations)
 
+        if (
+            'label_vec' in batch
+            and 'text_vec' in batch
+            and batch.label_vec is not None
+            and batch.text_vec is not None
+        ):
+            # tokens per batch
+            # we divide by the binary is_primary_worker() so that the numerator is
+            # num_tokens in all workers, and the denominator is 1.
+            tbp = AverageMetric(
+                (batch.label_vec != self.NULL_IDX).sum().item()
+                + (batch.text_vec != self.NULL_IDX).sum().item(),
+                float(is_primary_worker()),
+            )
+            self.global_metrics.add('tokens_per_batch', tbp)
+
         if self.is_training:
             output = self.train_step(batch)
         else:
             with torch.no_grad():
                 # save memory and compute by disabling autograd.
-                # use `with torch.enable_grad()` to gain back graidients.
+                # use `with torch.enable_grad()` to gain back gradients.
                 output = self.eval_step(batch)
 
-        if output is None:
-            return batch_reply
+        if output is not None:
+            # local metrics are automatically matched up
+            self.match_batch(batch_reply, batch.valid_indices, output)
 
-        self.match_batch(batch_reply, batch.valid_indices, output)
+        # broadcast the metrics back
+        for k, values in self._local_metrics.items():
+            if len(values) != len(batch.valid_indices):
+                raise IndexError(
+                    f"Batchsize mismatch on metric {k} (got {len(values)}, "
+                    f"expected {len(batch.valid_indices)}"
+                )
+            for i, value in zip(batch.valid_indices, values):
+                if 'metrics' not in batch_reply[i]:
+                    batch_reply[i]['metrics'] = {}
+                batch_reply[i]['metrics'][k] = value
+
+        # Make sure we push all the metrics to main thread in hogwild/workers
+        self.global_metrics.flush()
+
         return batch_reply
 
     @abstractmethod
@@ -1911,24 +1938,21 @@ class TorchAgent(ABC, Agent):
                 grad_norm = torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.opt['gradient_clip']
                 )
-            self.metrics['gnorm'] += grad_norm
-            self.metrics['clip'] += float(grad_norm > self.opt['gradient_clip'])
+            self.global_metrics.add('gnorm', AverageMetric(grad_norm))
+            self.global_metrics.add(
+                'clip', AverageMetric(float(grad_norm > self.opt['gradient_clip']))
+            )
 
-        self.metrics['updates'] += 1
         self.optimizer.step()
 
         # keep track up number of steps, compute warmup factor
         self._number_training_updates += 1
+        if is_primary_worker():
+            # in distributed mode, all workers step together, but we need to only
+            # count it once. Only the primary worker gets to make the count
+            self.global_metrics.add('updates', SumMetric(1))
 
-        # compute warmup adjustment if needed
-        if self.opt.get('warmup_updates', -1) > 0:
-            if not hasattr(self, 'warmup_scheduler'):
-                raise RuntimeError('Looks like you forgot to call build_lr_scheduler')
-            if self._is_lr_warming_up():
-                self.warmup_scheduler.step(epoch=self._number_training_updates)
-
-        if self.opt.get('lr_scheduler') == 'invsqrt' and not self._is_lr_warming_up():
-            # training step scheduler
+        if getattr(self, 'scheduler', None):
             self.scheduler.step(self._number_training_updates)
 
     def zero_grad(self):

@@ -6,6 +6,10 @@
 
 """
 This is an example how to extend torch ranker agent and use it for your own purpose.
+<<<<<<< HEAD
+=======
+
+>>>>>>> 72c304fa7cac16ed19d8bc75a017f17c8073dd2f
 In this example, we will just use a simple bag of words model.
 """
 from parlai.core.torch_ranker_agent import TorchRankerAgent
@@ -16,6 +20,10 @@ from torch import nn
 class ExampleBagOfWordsModel(nn.Module):
     """
     This constructs a simple bag of words model.
+<<<<<<< HEAD
+=======
+
+>>>>>>> 72c304fa7cac16ed19d8bc75a017f17c8073dd2f
     It contains a encoder for encoding candidates and context.
     """
 
@@ -55,6 +63,10 @@ class ExampleBagOfWordsModel(nn.Module):
 class TraAgent(TorchRankerAgent):
     """
     Example subclass of TorchRankerAgent.
+<<<<<<< HEAD
+=======
+
+>>>>>>> 72c304fa7cac16ed19d8bc75a017f17c8073dd2f
     This particular implementation is a simple bag-of-words model, which demonstrates
     the minimum implementation requirements to make a new ranking model.
     """
@@ -71,6 +83,10 @@ class TraAgent(TorchRankerAgent):
     def score_candidates(self, batch, cand_vecs, cand_encs=None):
         """
         This function takes in a Batch object as well as a Tensor of candidate vectors.
+<<<<<<< HEAD
+=======
+
+>>>>>>> 72c304fa7cac16ed19d8bc75a017f17c8073dd2f
         It must return a list of scores corresponding to the likelihood that the
         candidate vector at that index is the proper response. If `cand_encs` is not
         None (when we cache the encoding of the candidate vectors), you may use these
@@ -84,4 +100,8 @@ class TraAgent(TorchRankerAgent):
         This function is required to build the model and assign to the object
         `self.model`.
         """
+<<<<<<< HEAD
         return ExampleBagOfWordsModel(self.opt, self.dict)
+=======
+        return ExampleBagOfWordsModel(self.opt, self.dict)
+>>>>>>> 72c304fa7cac16ed19d8bc75a017f17c8073dd2f

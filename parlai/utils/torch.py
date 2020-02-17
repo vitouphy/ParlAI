@@ -9,6 +9,7 @@ Utility methods for dealing with torch code.
 
 from typing import Union, Optional, Tuple, Any, List, Sized
 
+
 try:
     import torch
 except ImportError:
@@ -19,6 +20,13 @@ import torch.optim
 """Near infinity, useful as a large penalty for scoring when inf is bad."""
 NEAR_INF = 1e20
 NEAR_INF_FP16 = 65504
+
+# according to the tensor cores documentation from nvidia, the matmuls in fp16
+# must all be multiples of 8 in order to get the speedup from fp16. We set this
+# as a constant here for clarity and convenience.  See
+# https://devblogs.nvidia.com/programming-tensor-cores-cuda-9/ for more
+# information.
+FP16_PAD_SIZE = 8
 
 
 def neginf(dtype: torch.dtype) -> float:
@@ -40,7 +48,7 @@ def padded_tensor(
     fp16friendly: bool = False,
 ) -> Tuple[torch.LongTensor, List[int]]:
     """
-    Create a right-padded matrix from an uneven list of lists.
+    Create a padded matrix from an uneven list of lists.
 
     Returns (padded, lengths), where padded is the padded matrix, and lengths
     is a list containing the lengths of each row.
@@ -56,7 +64,7 @@ def padded_tensor(
     :param bool use_cuda: if true, places `padded` on GPU
     :param bool left_padded:
     :param int max_len: if None, the max length is the maximum item length
-    :param bool fp16friendly: if True, pads the time dimension to be a multiple of 8.
+    :param bool fp16friendly: if True, pads the time dimension to be a multiple of 4.
 
     :returns: (padded, lengths) tuple
     :rtype: (Tensor[int64], list[int])
@@ -72,9 +80,9 @@ def padded_tensor(
     # if input tensors are empty, we should expand to nulls
     t = max(t, 1)
 
-    if fp16friendly and (t % 8 != 0):
-        # pad to be a multiple of 8 to ensure we use the tensor cores
-        t += 8 - (t % 8)
+    if fp16friendly and (t % FP16_PAD_SIZE != 0):
+        # pad to be fp16 friendly
+        t += FP16_PAD_SIZE - (t % FP16_PAD_SIZE)
 
     if isinstance(items[0], torch.Tensor):
         # keep type of input tensors, they may already be cuda ones
@@ -129,8 +137,8 @@ def padded_3d(
     c = max(len(item) for row in tensors for item in row)  # type: ignore
 
     # pad empty tensors
-    if fp16friendly and c % 8 != 0:
-        c += 8 - (c % 8)
+    if fp16friendly and c % FP16_PAD_SIZE != 0:
+        c += FP16_PAD_SIZE - (c % FP16_PAD_SIZE)
     c = max(c, 1)
 
     output = torch.full((a, b, c), pad_idx, dtype=dtype)
@@ -148,6 +156,39 @@ def padded_3d(
         output = output.cuda()
 
     return output
+
+
+def concat_without_padding(text_idx, cand_idx, use_cuda, null_idx=0):
+    """
+    Concatenate two right padded tensors and move padding to the right.
+
+    For example,
+        if text_idx = [[1, 2, 3, 4, 0, 0  ]]
+        and cand_idx = [[5, 6, 7, 8, 0, 0 ]]:
+    Then result = (tokens, segments) where
+        tokens = [[1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0]]
+        segments = [[0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0]]
+    """
+    assert text_idx.size(0) == cand_idx.size(0)
+    assert len(text_idx.size()) == 2
+    assert len(cand_idx.size()) == 2
+    segments_idx = [0, 1]
+    text_idx = text_idx.cpu()
+    cand_idx = cand_idx.cpu()
+    cand_len = cand_idx.size(1)
+    concat_len = text_idx.size(1) + cand_idx.size(1)
+    tokens = text_idx.new_zeros(text_idx.size(0), concat_len) + null_idx
+    segments = text_idx.new_zeros(text_idx.size(0), concat_len) + null_idx
+    for i in range(len(tokens)):
+        non_nuls = torch.sum(text_idx[i, :] != null_idx)
+        tokens[i, 0:non_nuls] = text_idx[i, 0:non_nuls]
+        segments[i, 0:non_nuls] = segments_idx[0]
+        tokens[i, non_nuls : non_nuls + cand_len] = cand_idx[i, :]
+        segments[i, non_nuls : non_nuls + cand_len] = segments_idx[1]
+    if use_cuda:
+        tokens = tokens.cuda()
+        segments = segments.cuda()
+    return tokens, segments
 
 
 def argsort(keys: List[Any], *lists: List[List[Any]], descending: bool = False):
@@ -178,46 +219,15 @@ def argsort(keys: List[Any], *lists: List[List[Any]], descending: bool = False):
     return output
 
 
-def fp16_optimizer_wrapper(
-    optimizer: torch.optim.Optimizer,  # type: ignore
-    verbose: bool = False,
-    dynamic_loss_scale: bool = True,
-    loss_initial_scale: float = 2.0 ** 17,
-):
+class IdentityLayer(torch.nn.Module):
     """
-    Wrap the an optimizer with FP16 loss scaling protection.
+    Identity layer module.
 
-    Requires apex to be installed. Will throw an ImportError if it is not.
-
-    :param optimizer:
-        Any torch optimizer
-    :param bool verbose:
-        Enables verbose output in the FP16 optimizer. Turning this on can help
-        debug when FP16 is underperforming.
-    :param bool dynamic_loss_scaling:
-        FP16 requires loss scaling to avoid underflows. It is recommended this
-        stays on, but advanced users may want it off.
-    :param float loss_initial_scale:
-        Initial loss scaling. Default chosen empirically, but models with very low
-        or high loss values may need this adjusted. Stick with powers of 2.
-
-    :returns:
-        An APEX FP16 optimizer. Please note this has different requirements on
-        how backward() and step() are called.
+    Useful for decoder-only Torch Generator agents.
     """
-    try:
-        import apex.fp16_utils
-    except ImportError:
-        raise ImportError(
-            'No fp16 support without apex. Please install it from '
-            'https://github.com/NVIDIA/apex'
-        )
-    return apex.fp16_utils.FP16_Optimizer(
-        optimizer,
-        dynamic_loss_scale=dynamic_loss_scale,
-        verbose=verbose,
-        # TODO: We may later want to remove this flag. Right now it
-        # empirically improves the first few backward passes, but future APEX
-        # improvements may make this unnecessary.
-        dynamic_loss_args={'init_scale': loss_initial_scale},
-    )
+
+    def forward(self, xs):
+        """
+        Identity.
+        """
+        return xs

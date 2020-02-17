@@ -4,8 +4,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from parlai.core.agents import create_task_agent_from_taskname
-from parlai.core.teachers import ParlAIDialogTeacher
+from parlai.core.teachers import ParlAIDialogTeacher, create_task_agent_from_taskname
 from .build import build
 
 import copy
@@ -169,6 +168,14 @@ class SimpleTeacher(DefaultTeacher):
         agent.add_argument('--light_use_cands', type=int, default=20)
         agent.add_argument('--light_use_clip_cands', type=int, default=10000)
         agent.add_argument('--light_use_speech_prefix', type='bool', default=False)
+
+
+class SelfchatTeacher(SimpleTeacher):
+    """
+    Teacher used to create candidates for selfchats, if needed.
+    """
+
+    pass
 
 
 def create_agents(opt):

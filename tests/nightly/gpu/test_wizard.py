@@ -29,6 +29,7 @@ RETRIEVAL_OPTIONS = {
     'model_file': 'zoo:wizard_of_wikipedia/full_dialogue_retrieval_model/model',
     'datatype': 'test',
     'n_heads': 6,
+    'batchsize': 32,
     'ffn_size': 1200,
     'embeddings_scale': False,
     'delimiter': ' __SOC__ ',
@@ -46,44 +47,23 @@ class TestWizardModel(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # go ahead and download things here
-        with testing_utils.capture_output():
-            parser = display_data.setup_args()
-            parser.set_defaults(**END2END_OPTIONS)
-            opt = parser.parse_args(print_args=False)
-            opt['num_examples'] = 1
-            display_data.display_data(opt)
+        parser = display_data.setup_args()
+        parser.set_defaults(**END2END_OPTIONS)
+        opt = parser.parse_args([], print_args=False)
+        opt['num_examples'] = 1
+        display_data.display_data(opt)
 
     def test_end2end(self):
-        stdout, valid, _ = testing_utils.eval_model(END2END_OPTIONS)
-        self.assertEqual(
-            valid['ppl'], 61.21, 'valid ppl = {}\nLOG:\n{}'.format(valid['ppl'], stdout)
-        )
-        self.assertEqual(
-            valid['f1'], 0.1717, 'valid f1 = {}\nLOG:\n{}'.format(valid['f1'], stdout)
-        )
-        self.assertGreaterEqual(
-            valid['know_acc'],
-            0.2201,
-            'valid know_acc = {}\nLOG:\n{}'.format(valid['know_acc'], stdout),
-        )
+        valid, _ = testing_utils.eval_model(END2END_OPTIONS, skip_test=True)
+        self.assertAlmostEqual(valid['ppl'], 61.21, places=2)
+        self.assertAlmostEqual(valid['f1'], 0.1717, places=4)
+        self.assertAlmostEqual(valid['know_acc'], 0.2201, places=4)
 
     def test_retrieval(self):
-        stdout, _, test = testing_utils.eval_model(RETRIEVAL_OPTIONS)
-        self.assertGreaterEqual(
-            test['accuracy'],
-            0.86,
-            'test acc = {}\nLOG:\n{}'.format(test['accuracy'], stdout),
-        )
-        self.assertGreaterEqual(
-            test['hits@5'],
-            0.98,
-            'test hits@5 = {}\nLOG:\n{}'.format(test['hits@5'], stdout),
-        )
-        self.assertGreaterEqual(
-            test['hits@10'],
-            0.99,
-            'test hits@10 = {}\nLOG:\n{}'.format(test['hits@10'], stdout),
-        )
+        _, test = testing_utils.eval_model(RETRIEVAL_OPTIONS, skip_valid=True)
+        self.assertAlmostEqual(test['accuracy'], 0.8631, places=4)
+        self.assertAlmostEqual(test['hits@5'], 0.9814, places=4)
+        self.assertAlmostEqual(test['hits@10'], 0.9917, places=4)
 
 
 class TestKnowledgeRetriever(unittest.TestCase):
