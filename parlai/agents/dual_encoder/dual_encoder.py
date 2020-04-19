@@ -123,7 +123,7 @@ class DualEncoderAgent(TorchRankerAgent):
         `self.model`.
         """
         # return ExampleBagOfWordsModel(self.opt, self.dict)
-        return DualEncoder(self.opt, self.dict).cuda()
+        return DualEncoder(self.opt, self.dict).to(device)
 
     def train_step(self, batch):
         """
@@ -141,14 +141,15 @@ class DualEncoderAgent(TorchRankerAgent):
         try:
             scores = self.score_candidates(batch, cand_vecs)
             nll = torch.nn.NLLLoss(reduction='none')
-            # print ('------- scores ---------')
-            # print (scores[0])
-            # print (scores.size())
+            print ('------- scores ---------')
+            print (scores[0])
+            print (scores.size())
             # print ('-------- loss ---------')
             # print (label_inds[0])
             # print (label_inds.size())
             # loss = scores[label_inds]
-            score = torch.log(scores)
+            scores = torch.log(scores)
+
             loss = nll(scores, label_inds)
 
             # loss = self.criterion(scores, label_inds)
