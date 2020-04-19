@@ -12,6 +12,8 @@ from parlai.core.torch_ranker_agent import TorchRankerAgent
 import torch
 from torch import nn
 from torch.nn import functional as F
+from parlai.core.torch_agent import TorchAgent, Output
+from parlai.core.metrics import AverageMetric
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -122,7 +124,7 @@ class DualEncoderAgent(TorchRankerAgent):
         # return ExampleBagOfWordsModel(self.opt, self.dict)
         return DualEncoder(self.opt, self.dict).cuda()
 
-        def train_step(self, batch):
+    def train_step(self, batch):
         """
         Train on a single batch of examples.
         """
