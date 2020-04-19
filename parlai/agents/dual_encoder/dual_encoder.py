@@ -14,6 +14,7 @@ from torch import nn
 from torch.nn import functional as F
 from parlai.core.torch_agent import TorchAgent, Output
 from parlai.core.metrics import AverageMetric
+from parlai.utils.misc import warn_once
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -147,8 +148,8 @@ class DualEncoderAgent(TorchRankerAgent):
             # print (label_inds[0])
             # print (label_inds.size())
             # loss = scores[label_inds]
-            
-            loss = -nll(scores, label_inds)
+            score = torch.log(scores)
+            loss = nll(scores, label_inds)
 
             # loss = self.criterion(scores, label_inds)
             # print ('[loss]: ', loss)
