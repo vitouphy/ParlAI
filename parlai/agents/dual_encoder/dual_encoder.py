@@ -82,8 +82,8 @@ class DualEncoder(nn.Module):
 
         # conver the score to sigmoid
         score = torch.sum(ctx_hidden * cand_hidden, 1).unsqueeze(1)
-        score = self.sigmoid(score + self.bias)
-        #score += self.bias
+        score = score + self.bias
+        #score = self.sigmoid(score + self.bias)
         score = score.reshape(batch_size, num_cands)
 
         return score
@@ -140,24 +140,12 @@ class DualEncoderAgent(TorchRankerAgent):
         )
         try:
             scores = self.score_candidates(batch, cand_vecs)
-            nll = torch.nn.NLLLoss(reduction='none')
-            print ('------- scores ---------')
-            print (scores[0])
-            print (scores.size())
-            # print ('-------- loss ---------')
-            # print (label_inds[0])
-            # print (label_inds.size())
-            # loss = scores[label_inds]
-            scores = torch.log(scores)
-
-            loss = nll(scores, label_inds)
-
-            # loss = self.criterion(scores, label_inds)
-            # print ('[loss]: ', loss)
+            loss = self.criterion(scores, label_inds)
             self.record_local_metric('mean_loss', AverageMetric.many(loss))
             loss = loss.mean()
             self.backward(loss)
             self.update_params()
+
         except RuntimeError as e:
             # catch out of memory exceptions during fwd/bck (skip batch)
             if 'out of memory' in str(e):
