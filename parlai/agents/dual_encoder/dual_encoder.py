@@ -13,6 +13,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 class DualEncoder(nn.Module):
     """
     This constructs a simple bag of words model.
@@ -40,8 +42,15 @@ class DualEncoder(nn.Module):
             num_layers=num_layers, 
             batch_first=True,
         )
-        self.M = torch.randn(hidden_dim, hidden_dim).cuda()
-        self.bias = torch.randn(1).cuda()
+        #self.M = torch.zeros(hidden_dim, hidden_dim, requires_grad=True).cuda()
+        #self.bias = torch.zeros(1, requires_grad=True).cuda()
+        self.M = torch.empty(hidden_dim, hidden_dim).to(device)
+        nn.init.uniform_(self.M, -0.01, 0.01)
+        self.M.requires_grad = True
+
+        self.bias = torch.empty(1).to(device)
+        nn.init.uniform_(self.bias, -0.01, 0.01)
+        self.bias.requires_grad = True
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, batch, cand_vecs, cand_encs=None):
@@ -71,6 +80,7 @@ class DualEncoder(nn.Module):
         # conver the score to sigmoid
         score = torch.sum(ctx_hidden * cand_hidden, 1).unsqueeze(1)
         score = self.sigmoid(score + self.bias)
+        #score += self.bias
         score = score.reshape(batch_size, num_cands)
 
         return score

@@ -78,7 +78,7 @@ def _save_eval_stats(opt, report):
     # Save report
     with open(report_fname, 'w') as f:
         print(f'[ Saving model report to {report_fname} ... ]')
-        json.dump({'opt': opt, 'report': report}, f, indent=4)
+        #json.dump({'opt': opt, 'report': report}, f, indent=4)
 
 
 def _eval_single_world(opt, agent, task):

@@ -150,7 +150,10 @@ class WorldLogger:
                     # the score of the cands were in numpy. => need conversion before json
                     if "candidate_scores" in act[1]:
                         act[1]['candidate_scores'] = act[1]['candidate_scores'].tolist()
-
+                    #print (act)
+                    if 'metrics' in act[1]:
+                        del act[1]['metrics']
+                    
                     txt = json.dumps(act)
                     fw.write(txt)
                     fw.write('\n')
