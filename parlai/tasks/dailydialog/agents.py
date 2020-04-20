@@ -294,7 +294,7 @@ class RerankTeacher(Convai2Teacher):
         if datatype in ['train', 'valid']:
             candidates = self.get_candidates(my_turn['text'], num_cands=10, include_gt=True)
         elif datatype == 'test':
-            candidates = self.get_candidates(my_turn['text'], num_cands=-1, include_gt=False)
+            candidates = self.get_candidates(my_turn['text'], num_cands=10, include_gt=True)
 
         for idx, turn in enumerate(their_turns):
             context_emotions.append(turn['emotion'])

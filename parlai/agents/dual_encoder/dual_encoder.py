@@ -26,6 +26,7 @@ class DualEncoder(nn.Module):
 
     def __init__(self, opt, dictionary):
         super().__init__()
+        self.opt = opt
         hidden_dim = opt.get('hidden_dim', 512)
         embedding_size = opt.get('embedding_size', 128)
         num_layers = opt.get('num_layers', 1)
@@ -83,8 +84,12 @@ class DualEncoder(nn.Module):
         # conver the score to sigmoid
         score = torch.sum(ctx_hidden * cand_hidden, 1).unsqueeze(1)
         score = score + self.bias
-        #score = self.sigmoid(score + self.bias)
+        score = self.sigmoid(score + self.bias)
         score = score.reshape(batch_size, num_cands)
+        
+        if (self.opt['datatype'] == 'valid'):
+            print (score)
+            print ('-------------------------------------------')
 
         return score
 
@@ -106,6 +111,7 @@ class DualEncoderAgent(TorchRankerAgent):
         arg_group.add_argument('--embedding_size', type=int, default=128)
         arg_group.add_argument('--num_layers', type=int, default=1)
         arg_group.add_argument('--dropout', type=float, default=0)
+    
     def score_candidates(self, batch, cand_vecs, cand_encs=None):
         """
         This function takes in a Batch object as well as a Tensor of candidate vectors.
@@ -122,50 +128,6 @@ class DualEncoderAgent(TorchRankerAgent):
         This function is required to build the model and assign to the object
         `self.model`.
         """
-        # return ExampleBagOfWordsModel(self.opt, self.dict)
-        return DualEncoder(self.opt, self.dict).to(device)
+        model = DualEncoder(self.opt, self.dict).to(device)
+        return model
 
-    def train_step(self, batch):
-        """
-        Train on a single batch of examples.
-        """
-        self._maybe_invalidate_fixed_encs_cache()
-        if batch.text_vec is None and batch.image is None:
-            return
-        self.model.train()
-        self.zero_grad()
-
-        cands, cand_vecs, label_inds = self._build_candidates(
-            batch, source=self.candidates, mode='train'
-        )
-        try:
-            scores = self.score_candidates(batch, cand_vecs)
-            loss = self.criterion(scores, label_inds)
-            self.record_local_metric('mean_loss', AverageMetric.many(loss))
-            loss = loss.mean()
-            self.backward(loss)
-            self.update_params()
-
-        except RuntimeError as e:
-            # catch out of memory exceptions during fwd/bck (skip batch)
-            if 'out of memory' in str(e):
-                print(
-                    '| WARNING: ran out of memory, skipping batch. '
-                    'if this happens frequently, decrease batchsize or '
-                    'truncate the inputs to the model.'
-                )
-                return Output()
-            else:
-                raise e
-
-        # Get train predictions
-        if self.candidates == 'batch':
-            self._get_batch_train_metrics(scores)
-            return Output()
-        if not self.opt.get('train_predict', False):
-            warn_once(
-                "Some training metrics are omitted for speed. Set the flag "
-                "`--train-predict` to calculate train metrics."
-            )
-            return Output()
-        return self._get_train_preds(scores, label_inds, cands, cand_vecs)
