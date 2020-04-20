@@ -12,6 +12,7 @@ from parlai.core.torch_ranker_agent import TorchRankerAgent
 import torch
 from torch import nn
 from torch.nn import functional as F
+from itertools import islice
 from parlai.core.torch_agent import TorchAgent, Output
 from parlai.core.metrics import AverageMetric
 from parlai.utils.misc import warn_once
@@ -135,6 +136,53 @@ class DualEncoderAgent(TorchRankerAgent):
         model = DualEncoder(self.opt, self.dict).to(device)
         return model
     
+    def train_step(self, batch):
+        """
+        Train on a single batch of examples.
+        """
+        self._maybe_invalidate_fixed_encs_cache()
+        if batch.text_vec is None and batch.image is None:
+            return
+        self.model.train()
+        self.zero_grad()
+
+        cands, cand_vecs, label_inds = self._build_candidates(
+            batch, source=self.candidates, mode='train'
+        )
+        try:
+            scores = self.score_candidates(batch, cand_vecs)
+            nll = torch.nn.NLLLoss()
+            scores = nll(scores)
+            loss = nll(scores, label_inds)
+            # loss = self.criterion(scores, label_inds)
+            self.record_local_metric('mean_loss', AverageMetric.many(loss))
+            loss = loss.mean()
+            self.backward(loss)
+            self.update_params()
+        except RuntimeError as e:
+            # catch out of memory exceptions during fwd/bck (skip batch)
+            if 'out of memory' in str(e):
+                print(
+                    '| WARNING: ran out of memory, skipping batch. '
+                    'if this happens frequently, decrease batchsize or '
+                    'truncate the inputs to the model.'
+                )
+                return Output()
+            else:
+                raise e
+
+        # Get train predictions
+        if self.candidates == 'batch':
+            self._get_batch_train_metrics(scores)
+            return Output()
+        if not self.opt.get('train_predict', False):
+            warn_once(
+                "Some training metrics are omitted for speed. Set the flag "
+                "`--train-predict` to calculate train metrics."
+            )
+            return Output()
+        return self._get_train_preds(scores, label_inds, cands, cand_vecs)
+
     def eval_step(self, batch):
         """
         Evaluate a single batch of examples.
