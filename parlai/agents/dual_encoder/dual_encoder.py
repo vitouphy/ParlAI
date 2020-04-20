@@ -87,10 +87,6 @@ class DualEncoder(nn.Module):
         score = self.sigmoid(score + self.bias)
         score = score.reshape(batch_size, num_cands)
         
-        if (self.opt['datatype'] == 'valid'):
-            print (score)
-            print ('-------------------------------------------')
-
         return score
 
 class DualEncoderAgent(TorchRankerAgent):
@@ -121,6 +117,14 @@ class DualEncoderAgent(TorchRankerAgent):
         instead of calling self.model on `cand_vecs`.
         """
         scores = self.model.forward(batch, cand_vecs, cand_encs)
+        print (batch['labels'][0])
+        cands = batch['candidates'][0]
+        print ("candidates: ")
+        for cand in cands:
+            print (cand)
+        print (batch.keys())
+        print (scores)
+        print ('========================================')
         return scores
 
     def build_model(self):
